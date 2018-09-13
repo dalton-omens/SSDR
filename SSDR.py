@@ -67,7 +67,7 @@ def initialize(poses, rest_pose, num_bones, iterations=5):
         Rp_T = Rp + bone_transforms[:, :, np.newaxis, 3, :]  # R * p + T
         # |num_verts| x |num_bones| x |num_poses|
         errs_per_pose = np.linalg.norm(rest_pose - Rp_T , axis=3).transpose((2, 0, 1))
-        vert_assignments = np.argmin(np.sum(errs_per_pose, axis=2), axis=1)
+        vert_assignments = np.argmin(np.sum(errs_per_pose, axis=2), axis=1) # |num_verts| x 1
 
         # For each bone, for each pose, compute new transform using kabsch
         for bone in range(num_bones):
@@ -104,16 +104,24 @@ def update_weight_map(bone_transforms, poses, rest_pose, sparseness):
         b = poses[:, v, :].reshape(3 * num_poses) # 3 * |num_poses| x 1
 
         # Bounds ensure non-negativity constraint and kind of affinity constraint
-        w = lsq_linear(A, b, bounds=(0, 1), method='bvls').x
-
+        w = lsq_linear(A, b, bounds=(0, 1), method='bvls').x  # |num_bones| x 1
         w /= np.sum(w) # Ensure that w sums to 1 (affinity constraint)
 
-        # TODO: Remove |B| - |K| bone weights with the least "effect"
-        # how does argpartition work!!?!?
+        # Remove |B| - |K| bone weights with the least "effect"
+        effect = np.linalg.norm(A * w, axis=0) # |num_bones| x 1
+        effective = np.argpartition(effect, num_bones - sparseness)[num_bones - sparseness:] # |sparseness| x 1
 
-        W[v] = w
+        # Run least squares again, but only use the most effective bones
+        A_reduce = A[:, effective] # 3 * |num_poses| x |sparseness|
+        w_reduce = lsq_linear(A_reduce, b, bounds=(0, 1), method='bvls').x # |sparseness| x 1
+        w_reduce /= np.sum(w_reduce) # Ensure that w sums to 1 (affinity constraint)
 
-    return None
+        w_sparse = np.zeros(num_bones)
+        w_sparse[effective] = w_reduce
+
+        W[v] = w_sparse
+
+    return W
 
 def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
     """
