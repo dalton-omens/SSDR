@@ -6,7 +6,6 @@ import pymel.core as pm
 import numpy as np
 from scipy.optimize import lsq_linear
 import time
-import random
 
 
 def kabsch(P, Q):
@@ -21,18 +20,20 @@ def kabsch(P, Q):
             
     return: A 4 x 3 matrix where the first 3 rows are the rotation and the last is translation
     """
+    if (P.size == 0 or Q.size == 0):
+        raise ValueError("Empty matrices sent to kabsch")
     centroid_P = np.mean(P, axis=0)
     centroid_Q = np.mean(Q, axis=0)
-    T = centroid_Q - centroid_P                       # translation vector
-    P = P - centroid_P                                # Center both matrices on centroid
-    Q = Q - centroid_Q
+    P_centered = P - centroid_P                       # Center both matrices on centroid
+    Q_centered = Q - centroid_Q
     H = np.dot(P.T, Q)                                # covariance matrix
     U, S, V = np.linalg.svd(H)                        # SVD
-    d = (np.linalg.det(U) * np.linalg.det(V)) < 0.0   # correct rotation matrix for
-    if d:                                             #  right-hand coordinate system
-        V[:, -1] = -V[:, -1]
     R = np.dot(U, V).T                                # calculate optimal rotation
-    return np.append(R, T)
+    if np.linalg.det(R) < 0:                          # correct rotation matrix for             
+        V[2,:] *= -1                                  #  right-hand coordinate system
+        R = np.dot(U, V).T                            
+    t = centroid_Q - np.dot(R, centroid_P)            # translation vector
+    return np.vstack((R, t))
 
 
 def initialize(poses, rest_pose, num_bones, iterations=5):
@@ -51,28 +52,42 @@ def initialize(poses, rest_pose, num_bones, iterations=5):
     num_poses = poses.shape[0]
     bone_transforms = np.empty((num_bones, num_poses, 4, 3))   # [(R, T) for for each pose] for each bone
                                                                # 3rd dim has 3 rows for R and 1 row for T
-    vert_assignments = np.empty((num_verts))   # Bone assignment for each vertex
+    vert_assignments = np.empty((num_verts))                   # Bone assignment for each vertex
+    rest_bones_t = np.empty((num_bones, 3))                    # Translations for bones at rest pose
+    rest_pose_corrected = np.empty((num_bones, num_verts, 3))  # Rest pose - mean of vertices attached to each bone
 
     # Randomly assign each vertex to a bone
     vert_assignments = np.random.randint(low=0, high=num_bones, size=num_verts)
+    
     # Compute initial random bone transformations
     for bone in range(num_bones):
+        rest_bones_t[bone] = np.mean(rest_pose[vert_assignments == bone], axis=0)
+        rest_pose_corrected[bone] = rest_pose - np.mean(rest_pose[vert_assignments == bone], axis=0)
         for pose in range(num_poses):
-            bone_transforms[bone, pose] = kabsch(rest_pose[vert_assignments == bone], poses[pose, vert_assignments == bone])
+            bone_transforms[bone, pose] = kabsch(rest_pose_corrected[bone, vert_assignments == bone], poses[pose, vert_assignments == bone])
     
-    for _ in range(iterations):
+    for it in range(iterations):
         # Re-assign bones to vertices using smallest reconstruction error from all poses
-        # |num_bones| x |num_poses| x |num_verts| x 3
-        Rp = np.dot(bone_transforms[:,:,:3,:], rest_pose.T).transpose((0, 1, 3, 2)) # R * p
-        Rp_T = Rp + bone_transforms[:, :, np.newaxis, 3, :]  # R * p + T
-        # |num_verts| x |num_bones| x |num_poses|
-        errs_per_pose = np.linalg.norm(rest_pose - Rp_T , axis=3).transpose((2, 0, 1))
-        vert_assignments = np.argmin(np.sum(errs_per_pose, axis=2), axis=1) # |num_verts| x 1
+        constructed = np.empty((num_bones, num_poses, num_verts, 3)) # |num_bones| x |num_poses| x |num_verts| x 3
+        for bone in range(num_bones):
+            # |num_poses| x |num_verts| x 3
+            Rp = np.dot(bone_transforms[bone,:,:3,:].transpose((0, 2, 1)), (rest_pose - rest_bones_t[bone]).T).transpose((0, 2, 1))
+            constructed[bone] = Rp + bone_transforms[bone, :, np.newaxis, 3, :]  # R * p + t
+        errs = np.mean(np.square(constructed - poses), axis=(1, 3))
+        vert_assignments = np.argmin(errs, axis=0)    
+        
+        ## Visualization of vertex assignments for bone 0 over iterations
+        #for i in range(num_verts):
+        #    if vert_assignments[i] == 0:
+        #        pm.select('test{0}.vtx[{1}]'.format(it, i), add=True)
+        #print(vert_assignments)
 
         # For each bone, for each pose, compute new transform using kabsch
         for bone in range(num_bones):
+            rest_bones_t[bone] = np.mean(rest_pose[vert_assignments == bone], axis=0)
+            rest_pose_corrected[bone] = rest_pose - np.mean(rest_pose[vert_assignments == bone], axis=0)
             for pose in range(num_poses):
-                bone_transforms[bone, pose] = kabsch(rest_pose[vert_assignments == bone], poses[pose, vert_assignments == bone])
+                bone_transforms[bone, pose] = kabsch(rest_pose_corrected[bone, vert_assignments == bone], poses[pose, vert_assignments == bone])
 
     return bone_transforms
 
@@ -108,16 +123,18 @@ def update_weight_map(bone_transforms, poses, rest_pose, sparseness):
         w /= np.sum(w) # Ensure that w sums to 1 (affinity constraint)
 
         # Remove |B| - |K| bone weights with the least "effect"
-        effect = np.linalg.norm(A * w, axis=0) # |num_bones| x 1
-        effective = np.argpartition(effect, num_bones - sparseness)[num_bones - sparseness:] # |sparseness| x 1
+        effect = np.linalg.norm((A * w).reshape(num_poses, 3, num_bones), axis=1) # |num_poses| x |num_bones|
+        effect = np.sum(effect, axis=0) # |num_bones| x 1
+        num_discarded = max(num_bones - sparseness, 0)
+        effective = np.argpartition(effect, num_discarded)[num_discarded:] # |sparseness| x 1
 
         # Run least squares again, but only use the most effective bones
-        A_reduce = A[:, effective] # 3 * |num_poses| x |sparseness|
-        w_reduce = lsq_linear(A_reduce, b, bounds=(0, 1), method='bvls').x # |sparseness| x 1
-        w_reduce /= np.sum(w_reduce) # Ensure that w sums to 1 (affinity constraint)
+        A_reduced = A[:, effective] # 3 * |num_poses| x |sparseness|
+        w_reduced = lsq_linear(A_reduced, b, bounds=(0, 1), method='bvls').x # |sparseness| x 1
+        w_reduced /= np.sum(w_reduced) # Ensure that w sums to 1 (affinity constraint)
 
         w_sparse = np.zeros(num_bones)
-        w_sparse[effective] = w_reduce
+        w_sparse[effective] = w_reduced
 
         W[v] = w_sparse
 
@@ -150,7 +167,7 @@ def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
 # Get numpy vertex arrays from selected objects. Rest pose is most recently selected.
 selectionLs = om.MGlobal.getActiveSelectionList()
 num_poses = selectionLs.length() - 1
-rest_pose = np.array(om.MFnMesh(selectionLs.getDagPath(num_poses)).getPoints())[:, :3]
-poses = np.array([m.MFnMesh(selectionLs.getDagPath(num_poses)).getPoints() for i in range(num_poses)])[:, :, :3]
+rest_pose = np.array(om.MFnMesh(selectionLs.getDagPath(num_poses)).getPoints(om.MSpace.kWorld))[:, :3]
+poses = np.array([om.MFnMesh(selectionLs.getDagPath(i)).getPoints(om.MSpace.kWorld) for i in range(num_poses)])[:, :, :3]
 
 SSDR(poses, rest_pose, 2)
