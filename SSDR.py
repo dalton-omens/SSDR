@@ -5,6 +5,7 @@ import maya.api.OpenMaya as om
 import pymel.core as pm
 import numpy as np
 from scipy.optimize import lsq_linear
+from scipy.cluster.vq import vq, kmeans, whiten
 import time
 
 
@@ -47,6 +48,7 @@ def initialize(poses, rest_pose, num_bones, iterations=5):
 
     return: A |num_bones| x |num_poses| x 4 x 3 matrix representing the stacked Rotation and Translation
               for each pose, for each bone.
+            A |num_bones| x 3 matrix representing the translations of the rest bones.
     """
     num_verts = rest_pose.shape[0]
     num_poses = poses.shape[0]
@@ -73,10 +75,11 @@ def initialize(poses, rest_pose, num_bones, iterations=5):
             # |num_poses| x |num_verts| x 3
             Rp = np.dot(bone_transforms[bone,:,:3,:].transpose((0, 2, 1)), (rest_pose - rest_bones_t[bone]).T).transpose((0, 2, 1))
             constructed[bone] = Rp + bone_transforms[bone, :, np.newaxis, 3, :]  # R * p + t
-        errs = np.mean(np.square(constructed - poses), axis=(1, 3))
+        errs = np.linalg.norm(constructed - poses, axis=(1, 3))
         vert_assignments = np.argmin(errs, axis=0)    
         
         ## Visualization of vertex assignments for bone 0 over iterations
+        ## Make 5 copies of an example pose mesh and call them test0, test1...
         #for i in range(num_verts):
         #    if vert_assignments[i] == 0:
         #        pm.select('test{0}.vtx[{1}]'.format(it, i), add=True)
@@ -89,16 +92,17 @@ def initialize(poses, rest_pose, num_bones, iterations=5):
             for pose in range(num_poses):
                 bone_transforms[bone, pose] = kabsch(rest_pose_corrected[bone, vert_assignments == bone], poses[pose, vert_assignments == bone])
 
-    return bone_transforms
+    return bone_transforms, rest_bones_t
 
 
-def update_weight_map(bone_transforms, poses, rest_pose, sparseness):
+def update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparseness):
     """
     Update the bone-vertex weight map W by fixing bone transformations and using a least squares
     solver subject to non-negativity constraint, affinity constraint, and sparseness constraint.
 
     inputs: bone_transforms |num_bones| x |num_poses| x 4 x 3 matrix representing the stacked 
                                 Rotation and Translation for each pose, for each bone.
+            rest_bones_t    |num_bones| x 3 matrix representing the translations of the rest bones
             poses           |num_poses| x |num_verts| x 3 matrix representing coordinates of vertices of each pose
             rest_pose       |num_verts| x 3 numpy matrix representing the coordinates of vertices in rest pose
             sparseness      Maximum number of bones allowed to influence a particular vertex
@@ -113,8 +117,11 @@ def update_weight_map(bone_transforms, poses, rest_pose, sparseness):
 
     for v in range(num_verts):
         # For every vertex, solve a least squares problem
-        Rp = np.dot(bone_transforms[:,:,:3,:], rest_pose[v]) # |num_bones| x |num_poses| x 3
-        Rp_T = Rp + bone_transforms[:, :, 3, :]  # R * p + T
+        Rp = np.empty((num_bones, num_poses, 3))
+        for bone in range(num_bones):
+            # |num_bones| x |num_poses| x 3
+            Rp[bone] = np.dot(bone_transforms[bone,:,:3,:], rest_pose[v] - rest_bones_t[bone]) 
+        Rp_T = Rp + bone_transforms[:, :, 3, :]  # R * p + t
         A = Rp_T.transpose((1, 2, 0)).reshape((3 * num_poses, num_bones)) # 3 * |num_poses| x |num_bones|
         b = poses[:, v, :].reshape(3 * num_poses) # 3 * |num_poses| x 1
 
@@ -140,6 +147,48 @@ def update_weight_map(bone_transforms, poses, rest_pose, sparseness):
 
     return W
 
+
+def update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose):
+    """
+    Updates the bone transformations by fixing the bone-vertex weight map and minimizing an
+    objective function individually for each pose and each bone.
+    
+    inputs: W               |num_verts| x |num_bones| matrix: bone-vertex weight map. Rows sum to 1, sparse.
+            bone_transforms |num_bones| x |num_poses| x 4 x 3 matrix representing the stacked 
+                                Rotation and Translation for each pose, for each bone.
+            rest_bones_t    |num_bones| x 3 matrix representing the translations of the rest bones
+            poses           |num_poses| x |num_verts| x 3 matrix representing coordinates of vertices of each pose
+            rest_pose       |num_verts| x 3 numpy matrix representing the coordinates of vertices in rest pose
+            
+    return: |num_bones| x |num_poses| x 4 x 3 matrix representing the stacked 
+                                Rotation and Translation for each pose, for each bone.
+    """
+    num_bones = W.shape[1]
+    num_poses = poses.shape[0]
+    num_verts = W.shape[0]
+    
+    for pose in range(num_poses):
+        for bone in range(num_bones):
+            # Calculate q_i for all vertices by equation (6)
+            bone_transforms_strip = np.delete(bone_transforms, bone, axis=0)  # |num_bones-1| x |num_poses| x 4 x 3
+            rest_bones_t_strip = np.delete(rest_bones_t, bone, axis=0)        # |num_bones-1| x 3
+            Rp = np.empty((num_vertices, num_bones-1, 3))
+            for bone2 in range(num_bones - 1): # maybe for vertices instead, so I can copy before? but I still have to do for all bones in the prev ugh
+                
+                p = rest_pose - rest_bones_t_strip[bone2]
+                # |num_verts| x |num_bones-1| x 3
+                Rp[:, bone2] = np.dot(bone_transforms_strip[bone2,pose,:3,:], p) 
+            Rp_T = Rp + bone_transforms[:, :, 3, :]  # R * p + t
+            q = poses[pose] - np.sum()
+
+            # Calculate p_star, q_star, p_bar, and q_bar for all verts by equation (8)
+
+            # Perform SVD by equation (9)
+
+            # Calculate rotation R and translation t by equation (10)
+    
+    return None
+
 def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
     """
     Computes the Smooth Skinning Decomposition with Rigid bones
@@ -155,9 +204,10 @@ def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
     """
     start_time = time.time()
 
-    bone_transforms = initialize(poses, rest_pose, num_bones)
-    for _ in range(max_iterations):
-        W = update_weight_map(bone_transforms, poses, rest_pose, sparseness)
+    bone_transforms, rest_bones_t = initialize(poses, rest_pose, num_bones)
+    for _ in range(3):
+        W = update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparseness)
+        #bone_transforms = update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose)
 
     print(bone_transforms)
     
