@@ -27,13 +27,13 @@ def kabsch(P, Q):
     centroid_Q = np.mean(Q, axis=0)
     P_centered = P - centroid_P                       # Center both matrices on centroid
     Q_centered = Q - centroid_Q
-    H = np.dot(P.T, Q)                                # covariance matrix
+    H = P_centered.T.dot(Q_centered)                  # covariance matrix
     U, S, V = np.linalg.svd(H)                        # SVD
-    R = np.dot(U, V).T                                # calculate optimal rotation
+    R = U.dot(V).T                                    # calculate optimal rotation
     if np.linalg.det(R) < 0:                          # correct rotation matrix for             
         V[2,:] *= -1                                  #  right-hand coordinate system
-        R = np.dot(U, V).T                            
-    t = centroid_Q - np.dot(R, centroid_P)            # translation vector
+        R = U.dot(V).T                          
+    t = centroid_Q - R.dot(centroid_P)                # translation vector
     return np.vstack((R, t))
 
 
@@ -73,17 +73,17 @@ def initialize(poses, rest_pose, num_bones, iterations=5):
         constructed = np.empty((num_bones, num_poses, num_verts, 3)) # |num_bones| x |num_poses| x |num_verts| x 3
         for bone in range(num_bones):
             # |num_poses| x |num_verts| x 3
-            Rp = np.dot(bone_transforms[bone,:,:3,:].transpose((0, 2, 1)), (rest_pose - rest_bones_t[bone]).T).transpose((0, 2, 1))
+            Rp = bone_transforms[bone,:,:3,:].dot((rest_pose - rest_bones_t[bone]).T).transpose((0, 2, 1))
             constructed[bone] = Rp + bone_transforms[bone, :, np.newaxis, 3, :]  # R * p + t
         errs = np.linalg.norm(constructed - poses, axis=(1, 3))
         vert_assignments = np.argmin(errs, axis=0)    
         
-        ## Visualization of vertex assignments for bone 0 over iterations
-        ## Make 5 copies of an example pose mesh and call them test0, test1...
-        #for i in range(num_verts):
-        #    if vert_assignments[i] == 0:
-        #        pm.select('test{0}.vtx[{1}]'.format(it, i), add=True)
-        #print(vert_assignments)
+        # Visualization of vertex assignments for bone 0 over iterations
+        # Make 5 copies of an example pose mesh and call them test0, test1...
+        for i in range(num_verts):
+            if vert_assignments[i] == 0:
+                pm.select('test{0}.vtx[{1}]'.format(it, i), add=True)
+        print(vert_assignments)
 
         # For each bone, for each pose, compute new transform using kabsch
         for bone in range(num_bones):
@@ -120,7 +120,7 @@ def update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparsenes
         Rp = np.empty((num_bones, num_poses, 3))
         for bone in range(num_bones):
             # |num_bones| x |num_poses| x 3
-            Rp[bone] = np.dot(bone_transforms[bone,:,:3,:], rest_pose[v] - rest_bones_t[bone]) 
+            Rp[bone] = bone_transforms[bone,:,:3,:].dot(rest_pose[v] - rest_bones_t[bone])
         Rp_T = Rp + bone_transforms[:, :, 3, :]  # R * p + t
         A = Rp_T.transpose((1, 2, 0)).reshape((3 * num_poses, num_bones)) # 3 * |num_poses| x |num_bones|
         b = poses[:, v, :].reshape(3 * num_poses) # 3 * |num_poses| x 1
