@@ -72,18 +72,18 @@ def initialize(poses, rest_pose, num_bones, iterations=5):
         # Re-assign bones to vertices using smallest reconstruction error from all poses
         constructed = np.empty((num_bones, num_poses, num_verts, 3)) # |num_bones| x |num_poses| x |num_verts| x 3
         for bone in range(num_bones):
-            # |num_poses| x |num_verts| x 3
-            Rp = bone_transforms[bone,:,:3,:].dot((rest_pose - rest_bones_t[bone]).T).transpose((0, 2, 1))
-            constructed[bone] = Rp + bone_transforms[bone, :, np.newaxis, 3, :]  # R * p + t
+            Rp = bone_transforms[bone,:,:3,:].dot((rest_pose - rest_bones_t[bone]).T).transpose((0, 2, 1)) # |num_poses| x |num_verts| x 3
+            # R * p + T
+            constructed[bone] = Rp + bone_transforms[bone, :, np.newaxis, 3, :]
         errs = np.linalg.norm(constructed - poses, axis=(1, 3))
         vert_assignments = np.argmin(errs, axis=0)    
         
-        # Visualization of vertex assignments for bone 0 over iterations
-        # Make 5 copies of an example pose mesh and call them test0, test1...
-        for i in range(num_verts):
-            if vert_assignments[i] == 0:
-                pm.select('test{0}.vtx[{1}]'.format(it, i), add=True)
-        print(vert_assignments)
+        ## Visualization of vertex assignments for bone 0 over iterations
+        ## Make 5 copies of an example pose mesh and call them test0, test1...
+        #for i in range(num_verts):
+        #    if vert_assignments[i] == 0:
+        #        pm.select('test{0}.vtx[{1}]'.format(it, i), add=True)
+        #print(vert_assignments)
 
         # For each bone, for each pose, compute new transform using kabsch
         for bone in range(num_bones):
@@ -119,9 +119,9 @@ def update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparsenes
         # For every vertex, solve a least squares problem
         Rp = np.empty((num_bones, num_poses, 3))
         for bone in range(num_bones):
-            # |num_bones| x |num_poses| x 3
-            Rp[bone] = bone_transforms[bone,:,:3,:].dot(rest_pose[v] - rest_bones_t[bone])
-        Rp_T = Rp + bone_transforms[:, :, 3, :]  # R * p + t
+            Rp[bone] = bone_transforms[bone,:,:3,:].dot(rest_pose[v] - rest_bones_t[bone]) # |num_bones| x |num_poses| x 3
+        # R * p + T
+        Rp_T = Rp + bone_transforms[:, :, 3, :]
         A = Rp_T.transpose((1, 2, 0)).reshape((3 * num_poses, num_bones)) # 3 * |num_poses| x |num_bones|
         b = poses[:, v, :].reshape(3 * num_poses) # 3 * |num_poses| x 1
 
@@ -169,25 +169,40 @@ def update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose):
     
     for pose in range(num_poses):
         for bone in range(num_bones):
+            # Represents the points in rest pose without this rest bone's translation
+            p_corrected = rest_pose - rest_bones_t[bone] # |num_verts| x 3
+
             # Calculate q_i for all vertices by equation (6)
-            bone_transforms_strip = np.delete(bone_transforms, bone, axis=0)  # |num_bones-1| x |num_poses| x 4 x 3
-            rest_bones_t_strip = np.delete(rest_bones_t, bone, axis=0)        # |num_bones-1| x 3
-            Rp = np.empty((num_vertices, num_bones-1, 3))
-            for bone2 in range(num_bones - 1): # maybe for vertices instead, so I can copy before? but I still have to do for all bones in the prev ugh
-                
-                p = rest_pose - rest_bones_t_strip[bone2]
-                # |num_verts| x |num_bones-1| x 3
-                Rp[:, bone2] = np.dot(bone_transforms_strip[bone2,pose,:3,:], p) 
-            Rp_T = Rp + bone_transforms[:, :, 3, :]  # R * p + t
-            q = poses[pose] - np.sum()
+            constructed = np.empty((num_bones, num_verts, 3)) # |num_bones| x |num_verts| x 3
+            for bone2 in range(num_bones):
+                # can't use p_corrected before because we want to correct for every bone2 distinctly
+                Rp = bone_transforms[bone2,pose,:3,:].dot((rest_pose - rest_bones_t[bone2]).T).T # |num_verts| x 3
+                # R * p + T
+                constructed[bone2] = Rp + bone_transforms[bone2, pose, 3, :]
+            # w * (R * p + T)
+            constructed = constructed.transpose((1, 0, 2)) * W[:, :, np.newaxis] # |num_verts| x |nun_bones| x 3
+            constructed = np.delete(constructed, bone, axis=1) # |num_verts| x |num_bones-1| x 3
+            q = poses[pose] - np.sum(constructed, axis=1) # |num_verts| x 3
 
             # Calculate p_star, q_star, p_bar, and q_bar for all verts by equation (8)
+            p_star = np.sum(np.square(W[:, bone, np.newaxis]) * p_corrected, axis=0) # |num_verts| x 3 => 3 x 1
+            p_star /= np.sum(np.square(W[:, bone])) # 3 x 1
+            q_star = np.sum(W[:, bone, np.newaxis] * q, axis=0) # |num_verts| x 3 => 3 x 1
+            q_star /= np.sum(np.square(W[:, bone])) # 3 x 1
+            p_bar = p_corrected - p_star # |num_verts| x 3
+            q_bar = q - W[:, bone, np.newaxis] * q_star # |num_verts| x 3
 
             # Perform SVD by equation (9)
+            P = (p_bar * W[:, bone, np.newaxis]).T # 3 x |num_verts|
+            Q = q_bar.T # 3 x |num_verts|
+            U, S, V = np.linalg.svd(np.matmul(P, Q.T))
 
             # Calculate rotation R and translation t by equation (10)
+            R = V.dot(U.T) # 3 x 3
+            t = q_star - R.dot(p_star) # 3 x 1
+            bone_transforms[bone, pose] = np.vstack((R, t)) # 4 x 3
     
-    return None
+    return bone_transforms
 
 def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
     """
@@ -199,20 +214,42 @@ def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
             sparseness      max number of bones influencing a single vertex
             
     return: An i x j matrix of bone-vertex weights, where i = # vertices and j = # bones
-            A length-t list of (length-B lists of bone transformations [R_j | T_j] ), one for each pose
-            A list of the corrected vertex positions of the rest pose
+            A length-B list of (length-t lists of bone transformations [R_j | T_j] ), one list for each bone
+            A list of bone translations for the bones at rest
     """
     start_time = time.time()
 
     bone_transforms, rest_bones_t = initialize(poses, rest_pose, num_bones)
     for _ in range(3):
         W = update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparseness)
-        #bone_transforms = update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose)
+        bone_transforms = update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose)
 
     print(bone_transforms)
+    print(W)
     
     end_time = time.time()
     print("Done. Calculation took {0} seconds".format(end_time - start_time))
+
+    return W, bone_transforms, rest_bones_t
+
+
+def reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W):
+    """
+    Computes the average reconstruction error on some poses given bone transforms and weights.
+
+    inputs : poses           |num_poses| x |num_verts| x 3 matrix representing coordinates of vertices of each pose
+             rest_pose       |num_verts| x 3 numpy matrix representing the coordinates of vertices in rest pose
+             bone_transforms |num_bones| x |num_poses| x 4 x 3 matrix representing the stacked 
+                                Rotation and Translation for each pose, for each bone.
+             rest_bones_t    |num_bones| x 3 matrix representing the translations of the rest bones
+             W               |num_verts| x |num_bones| matrix: bone-vertex weight map. Rows sum to 1, sparse.
+
+    return: The average reconstruction error v - sum{bones} (w * (R @ p + T))
+    """
+    p_corrected = rest_pose[np.newaxis, :, :] - rest_bones_t[:, np.newaxis, :] # |num_bones| x |num_verts| x 3
+    constructions = np.empty((num_bones, num_poses, num_verts, 3))
+    # Work in progress
+
 
 # Get numpy vertex arrays from selected objects. Rest pose is most recently selected.
 selectionLs = om.MGlobal.getActiveSelectionList()
@@ -220,4 +257,5 @@ num_poses = selectionLs.length() - 1
 rest_pose = np.array(om.MFnMesh(selectionLs.getDagPath(num_poses)).getPoints(om.MSpace.kWorld))[:, :3]
 poses = np.array([om.MFnMesh(selectionLs.getDagPath(i)).getPoints(om.MSpace.kWorld) for i in range(num_poses)])[:, :, :3]
 
-SSDR(poses, rest_pose, 2)
+W, bone_transforms, rest_bones_t = SSDR(poses, rest_pose, 2)
+
