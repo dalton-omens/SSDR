@@ -121,7 +121,7 @@ def update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparsenes
         for bone in range(num_bones):
             Rp[bone] = bone_transforms[bone,:,:3,:].dot(rest_pose[v] - rest_bones_t[bone]) # |num_bones| x |num_poses| x 3
         # R * p + T
-        Rp_T = Rp + bone_transforms[:, :, 3, :]
+        Rp_T = Rp + bone_transforms[:, :, 3, :] # |num_bones| x |num_poses| x 3
         A = Rp_T.transpose((1, 2, 0)).reshape((3 * num_poses, num_bones)) # 3 * |num_poses| x |num_bones|
         b = poses[:, v, :].reshape(3 * num_poses) # 3 * |num_poses| x 1
 
@@ -142,6 +142,7 @@ def update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparsenes
 
         w_sparse = np.zeros(num_bones)
         w_sparse[effective] = w_reduced
+        w_sparse /= np.sum(w_sparse) # Ensure that w_sparse sums to 1 (affinity constraint)
 
         W[v] = w_sparse
 
@@ -180,29 +181,34 @@ def update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose):
                 # R * p + T
                 constructed[bone2] = Rp + bone_transforms[bone2, pose, 3, :]
             # w * (R * p + T)
-            constructed = constructed.transpose((1, 0, 2)) * W[:, :, np.newaxis] # |num_verts| x |nun_bones| x 3
+            constructed = constructed.transpose((1, 0, 2)) * W[:, :, np.newaxis] # |num_verts| x |num_bones| x 3
             constructed = np.delete(constructed, bone, axis=1) # |num_verts| x |num_bones-1| x 3
             q = poses[pose] - np.sum(constructed, axis=1) # |num_verts| x 3
 
             # Calculate p_star, q_star, p_bar, and q_bar for all verts by equation (8)
             p_star = np.sum(np.square(W[:, bone, np.newaxis]) * p_corrected, axis=0) # |num_verts| x 3 => 3 x 1
             p_star /= np.sum(np.square(W[:, bone])) # 3 x 1
+            
             q_star = np.sum(W[:, bone, np.newaxis] * q, axis=0) # |num_verts| x 3 => 3 x 1
             q_star /= np.sum(np.square(W[:, bone])) # 3 x 1
             p_bar = p_corrected - p_star # |num_verts| x 3
             q_bar = q - W[:, bone, np.newaxis] * q_star # |num_verts| x 3
-
+            
             # Perform SVD by equation (9)
             P = (p_bar * W[:, bone, np.newaxis]).T # 3 x |num_verts|
             Q = q_bar.T # 3 x |num_verts|
+            
             U, S, V = np.linalg.svd(np.matmul(P, Q.T))
 
             # Calculate rotation R and translation t by equation (10)
-            R = V.dot(U.T) # 3 x 3
+            R = U.dot(V).T # 3 x 3
             t = q_star - R.dot(p_star) # 3 x 1
-            bone_transforms[bone, pose] = np.vstack((R, t)) # 4 x 3
+            
+            bone_transforms[bone, pose, :3, :] = R
+            bone_transforms[bone, pose, 3, :] = t
     
     return bone_transforms
+
 
 def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
     """
@@ -220,15 +226,14 @@ def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
     start_time = time.time()
 
     bone_transforms, rest_bones_t = initialize(poses, rest_pose, num_bones)
-    for _ in range(3):
+    for _ in range(10):
         W = update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparseness)
         bone_transforms = update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose)
-
-    print(bone_transforms)
-    print(W)
+        print("Reconstruction error:", reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W))
     
     end_time = time.time()
     print("Done. Calculation took {0} seconds".format(end_time - start_time))
+    print("Avg reconstruction error:", reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W))
 
     return W, bone_transforms, rest_bones_t
 
@@ -268,4 +273,3 @@ rest_pose = np.array(om.MFnMesh(selectionLs.getDagPath(num_poses)).getPoints(om.
 poses = np.array([om.MFnMesh(selectionLs.getDagPath(i)).getPoints(om.MSpace.kWorld) for i in range(num_poses)])[:, :, :3]
 
 W, bone_transforms, rest_bones_t = SSDR(poses, rest_pose, 2)
-print("Avg reconstruction error:", reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W))
