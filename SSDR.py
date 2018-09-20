@@ -246,9 +246,19 @@ def reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W):
 
     return: The average reconstruction error v - sum{bones} (w * (R @ p + T))
     """
+    num_bones = bone_transforms.shape[0]
+    num_verts = W.shape[0]
+    num_poses = poses.shape[0]
+    # Points in rest pose without rest bone translations
     p_corrected = rest_pose[np.newaxis, :, :] - rest_bones_t[:, np.newaxis, :] # |num_bones| x |num_verts| x 3
-    constructions = np.empty((num_bones, num_poses, num_verts, 3))
-    # Work in progress
+    constructions = np.empty((num_bones, num_poses, num_verts, 3)) # |num_bones| x |num_poses| x |num_verts| x 3
+    for bone in range(num_bones):
+        # When you are a vectorizing GOD
+        constructions[bone] = np.einsum('ijk,lk->ilj', bone_transforms[bone, :, :3, :], p_corrected[bone]) # |num_poses| x |num_verts| x 3
+    constructions += bone_transforms[:, :, np.newaxis, 3, :] # |num_bones| x |num_poses| x |num_verts| x 3
+    constructions *= (W.T)[:, np.newaxis, :, np.newaxis] # |num_bones| x |num_poses| x |num_verts| x 3
+    errors = poses - np.sum(constructions, axis=0) # |num_poses| x |num_verts| x 3
+    return np.mean(np.linalg.norm(errors, axis=2))
 
 
 # Get numpy vertex arrays from selected objects. Rest pose is most recently selected.
@@ -258,4 +268,4 @@ rest_pose = np.array(om.MFnMesh(selectionLs.getDagPath(num_poses)).getPoints(om.
 poses = np.array([om.MFnMesh(selectionLs.getDagPath(i)).getPoints(om.MSpace.kWorld) for i in range(num_poses)])[:, :, :3]
 
 W, bone_transforms, rest_bones_t = SSDR(poses, rest_pose, 2)
-
+print("Avg reconstruction error:", reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W))
