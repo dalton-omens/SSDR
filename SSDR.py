@@ -53,13 +53,14 @@ def initialize(poses, rest_pose, num_bones, iterations=5):
     num_verts = rest_pose.shape[0]
     num_poses = poses.shape[0]
     bone_transforms = np.empty((num_bones, num_poses, 4, 3))   # [(R, T) for for each pose] for each bone
-                                                               # 3rd dim has 3 rows for R and 1 row for T
-    vert_assignments = np.empty((num_verts))                   # Bone assignment for each vertex
+                                                               # 3rd dim has 3 rows for R and 1 row for T            
     rest_bones_t = np.empty((num_bones, 3))                    # Translations for bones at rest pose
     rest_pose_corrected = np.empty((num_bones, num_verts, 3))  # Rest pose - mean of vertices attached to each bone
 
-    # Randomly assign each vertex to a bone
-    vert_assignments = np.random.randint(low=0, high=num_bones, size=num_verts)
+    # Use k-means to assign bones to vertices
+    whitened = whiten(rest_pose)
+    codebook, _ = kmeans(whitened, num_bones)
+    vert_assignments, _ = vq(whitened, codebook) # Bone assignment for each vertex (|num_verts| x 1)
     
     # Compute initial random bone transformations
     for bone in range(num_bones):
@@ -226,7 +227,7 @@ def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
     start_time = time.time()
 
     bone_transforms, rest_bones_t = initialize(poses, rest_pose, num_bones)
-    for _ in range(10):
+    for _ in range(max_iterations):
         W = update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparseness)
         bone_transforms = update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose)
         print("Reconstruction error:", reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W))
