@@ -230,41 +230,35 @@ def SSDR(poses, rest_pose, num_bones, sparseness=4, max_iterations=20):
     for _ in range(max_iterations):
         W = update_weight_map(bone_transforms, rest_bones_t, poses, rest_pose, sparseness)
         bone_transforms = update_bone_transforms(W, bone_transforms, rest_bones_t, poses, rest_pose)
-        print("Reconstruction error:", reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W))
+        errors = reconstruct(rest_pose, bone_transforms, rest_bones_t, W) - poses
+        print("Reconstruction error:", np.mean(np.linalg.norm(errors, axis=2)))
     
     end_time = time.time()
     print("Done. Calculation took {0} seconds".format(end_time - start_time))
-    print("Avg reconstruction error:", reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W))
+    errors = reconstruct(rest_pose, bone_transforms, rest_bones_t, W) - poses
+    print("Avg reconstruction error:", np.mean(np.linalg.norm(errors, axis=2)))
 
     return W, bone_transforms, rest_bones_t
 
 
-def reconstruction_err(poses, rest_pose, bone_transforms, rest_bones_t, W):
+def reconstruct(rest_pose, bone_transforms, rest_bones_t, W):
     """
-    Computes the average reconstruction error on some poses given bone transforms and weights.
+    Computes the skinned vertex positions on some poses given bone transforms and weights.
 
-    inputs : poses           |num_poses| x |num_verts| x 3 matrix representing coordinates of vertices of each pose
-             rest_pose       |num_verts| x 3 numpy matrix representing the coordinates of vertices in rest pose
+    inputs : rest_pose       |num_verts| x 3 numpy matrix representing the coordinates of vertices in rest pose
              bone_transforms |num_bones| x |num_poses| x 4 x 3 matrix representing the stacked 
                                 Rotation and Translation for each pose, for each bone.
              rest_bones_t    |num_bones| x 3 matrix representing the translations of the rest bones
              W               |num_verts| x |num_bones| matrix: bone-vertex weight map. Rows sum to 1, sparse.
 
-    return: The average reconstruction error v - sum{bones} (w * (R @ p + T))
+    return: |num_poses| x |num_verts| x 3 Vertex positions for all poses: sum{bones} (w * (R @ p + T)) 
     """
-    num_bones = bone_transforms.shape[0]
-    num_verts = W.shape[0]
-    num_poses = poses.shape[0]
     # Points in rest pose without rest bone translations
     p_corrected = rest_pose[np.newaxis, :, :] - rest_bones_t[:, np.newaxis, :] # |num_bones| x |num_verts| x 3
-    constructions = np.empty((num_bones, num_poses, num_verts, 3)) # |num_bones| x |num_poses| x |num_verts| x 3
-    for bone in range(num_bones):
-        # When you are a vectorizing GOD
-        constructions[bone] = np.einsum('ijk,lk->ilj', bone_transforms[bone, :, :3, :], p_corrected[bone]) # |num_poses| x |num_verts| x 3
+    constructions = np.einsum('bijk,blk->bilj', bone_transforms[:, :, :3, :], p_corrected) # |num_bones| x |num_poses| x |num_verts| x 3
     constructions += bone_transforms[:, :, np.newaxis, 3, :] # |num_bones| x |num_poses| x |num_verts| x 3
     constructions *= (W.T)[:, np.newaxis, :, np.newaxis] # |num_bones| x |num_poses| x |num_verts| x 3
-    errors = poses - np.sum(constructions, axis=0) # |num_poses| x |num_verts| x 3
-    return np.mean(np.linalg.norm(errors, axis=2))
+    return np.sum(constructions, axis=0)
 
 
 # Get numpy vertex arrays from selected objects. Rest pose is most recently selected.

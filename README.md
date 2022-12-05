@@ -16,6 +16,6 @@ Now run the script and it should calculate a weight map, bone transforms for eac
 ## Other info
 This is not an exact recreation of the algorithm in Le and Deng's paper.
 
-The "rest bones" is not a concept explicitly described in the paper but helps converge to a better solution. To get to a final mesh from the result bones, we first subtract off the rest bone translation for every bone and every vertex, then do the standard W^T * (R * p + T) tansformation to get to the final pose. This is demonstrated in the reconstruction_err function with the additional pose dimension.
+The "rest bones" is not a concept explicitly described in the paper but helps converge to a better solution. To get to a final mesh from the result bones, we first subtract off the rest bone translation for every bone and every vertex, then do the standard W^T * (R * p + T) tansformation to get to the final pose. This is demonstrated in the reconstruct function with the additional pose dimension.
 
 We also do not preform bone re-initialization.
